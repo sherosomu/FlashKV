@@ -41,6 +41,11 @@ redis-java/
 
 ## Building
 
+### Prerequisites
+
+- JDK 17 or newer
+- Maven 3.8+ (optional if compiling directly with `javac`)
+
 ```bash
 cd redis-java
 mvn -q package
