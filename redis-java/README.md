@@ -154,3 +154,49 @@ redis-cli -p 6390 SET replkey replvalue
 redis-cli -p 6391 GET replkey     # => replvalue
 redis-cli -p 6390 WAIT 1 1000     # => 1
 ```
+## 🏛️ System Architecture
+
+```mermaid
+graph TD
+    %% Client & Network Tier
+    subgraph Network ["1. Client & Network I/O Layer"]
+        C1[Client App / redis-cli] -->|Raw TCP Stream| S[RedisServer :6379]
+        C2[Replication Master / Peer] -->|Replication Stream| S
+        S -->|Accept Connection| CH[ClientHandler Thread Worker]
+    end
+
+    %% Protocol Engine
+    subgraph Protocol ["2. RESP Protocol Serialization Engine"]
+        CH --> RR[RespReader / CountingInputStream]
+        RR -->|Parse Frames: Arrays, Bulk Strings, Ints| CD[CommandDispatcher]
+        CD -->|Serialize Response Byte Arrays| RW[RespWriter]
+        RW -->|Flush TCP Bytes| CH
+    end
+
+    %% Execution & Storage Core
+    subgraph Core ["3. In-Memory Core & State Store"]
+        CD -->|Route Command| RDB[(RedisDatabase Memory Map)]
+        RDB --> KV[Key-Value Store: String, List, Stream]
+        RDB --> TTL[Active & Passive TTL Expiration Engine]
+        RDB --> BL[Blocking Monitor Queue: BLPOP / XREAD]
+    end
+
+    %% Replication & Persistence
+    subgraph Subsystems ["4. Distributed Sync & Persistence Subsystems"]
+        CD -->|Handshake & Replication Stream| RC[ReplicaClient / ReplicationState]
+        RC -->|PSYNC / PING / WAIT Quorum| PS[Replicas Sync Buffer]
+        CD -->|PUB / SUB Engine| PSM[PubSubManager]
+        RDB -.->|Binary RDB Snapshot & Restore| RDBL[RdbLoader Engine]
+    end
+
+    %% Styling
+    classDef dark fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef accent fill:#0f172a,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
+    classDef storage fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+    classDef sub fill:#042f2e,stroke:#34d399,stroke-width:2px,color:#f8fafc;
+
+    class C1,C2,S,CH dark;
+    class RR,CD,RW accent;
+    class RDB,KV,TTL,BL storage;
+    class RC,PS,PSM,RDBL sub;
+```
