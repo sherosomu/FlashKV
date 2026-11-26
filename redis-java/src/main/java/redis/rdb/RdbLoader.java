@@ -225,6 +225,6 @@ public class RdbLoader {
         byte[] buf = new byte[(int) len];
         System.arraycopy(data, pos, buf, 0, (int) len);
         pos += (int) len;
-        return new String(buf, StandardCharsets.UTF_8);
+        return new String(buf, StandardCharsets.ISO_8859_1);
     }
 }

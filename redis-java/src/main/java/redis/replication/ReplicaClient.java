@@ -8,6 +8,7 @@ import redis.rdb.RdbLoader;
 import redis.server.ClientContext;
 import redis.server.ServerContext;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
@@ -36,7 +37,12 @@ public class ReplicaClient implements Runnable {
             socket.setTcpNoDelay(true);
             OutputStream rawOut = socket.getOutputStream();
             RespWriter handshakeWriter = new RespWriter(rawOut);
-            RespReader handshakeReader = new RespReader(socket.getInputStream());
+            // One buffered stream shared by the handshake reader and the replication-stream
+            // reader. If each had its own buffer, the handshake buffer could read ahead and
+            // swallow the first propagated commands. CountingInputStream wraps the buffer, so it
+            // counts bytes the parser actually consumed, which is what the offset must be.
+            BufferedInputStream in = new BufferedInputStream(socket.getInputStream(), 16 * 1024);
+            RespReader handshakeReader = new RespReader(in);
 
             // 1. PING
             rawOut.write(RespWriter.encodeCommandArray("PING"));
@@ -71,7 +77,7 @@ public class ReplicaClient implements Runnable {
             RdbLoader.loadFromBytes(rdb, srv.database);
 
             // 6. Continuously apply the propagated command stream
-            CountingInputStream counting = new CountingInputStream(socket.getInputStream());
+            CountingInputStream counting = new CountingInputStream(in);
             RespReader streamReader = new RespReader(counting);
             RespWriter ackWriter = new RespWriter(rawOut);
             ClientContext replicaCtx = new ClientContext("master", new RespWriter(OutputStream.nullOutputStream()));

@@ -6,6 +6,7 @@ import redis.protocol.RespWriter;
 import redis.rdb.EmptyRdb;
 import redis.replication.ReplicationState;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
@@ -29,7 +30,9 @@ public class ClientHandler implements Runnable {
         ClientContext ctx = null;
         try {
             socket.setTcpNoDelay(true);
-            RespReader reader = new RespReader(socket.getInputStream());
+            // Buffered: the parser reads byte-by-byte, and without a buffer every
+            // read() was a separate syscall on the socket.
+            RespReader reader = new RespReader(new BufferedInputStream(socket.getInputStream(), 16 * 1024));
             RespWriter writer = new RespWriter(socket.getOutputStream());
             ctx = new ClientContext(socket.getRemoteSocketAddress().toString(), writer);
 
@@ -59,7 +62,7 @@ public class ClientHandler implements Runnable {
 
         byte[] rdb = EmptyRdb.bytes();
         String header = "$" + rdb.length + "\r\n";
-        rawOut.write(header.getBytes(StandardCharsets.UTF_8));
+        rawOut.write(header.getBytes(StandardCharsets.ISO_8859_1));
         rawOut.write(rdb);
         rawOut.flush();
 

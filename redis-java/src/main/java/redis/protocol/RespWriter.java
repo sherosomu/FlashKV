@@ -19,17 +19,17 @@ public class RespWriter {
     }
 
     public synchronized void writeSimpleString(String s) throws IOException {
-        out.write(("+" + s + "\r\n").getBytes(StandardCharsets.UTF_8));
+        out.write(("+" + s + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
     public synchronized void writeError(String message) throws IOException {
-        out.write(("-" + message + "\r\n").getBytes(StandardCharsets.UTF_8));
+        out.write(("-" + message + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
     public synchronized void writeInteger(long value) throws IOException {
-        out.write((":" + value + "\r\n").getBytes(StandardCharsets.UTF_8));
+        out.write((":" + value + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
@@ -39,24 +39,24 @@ public class RespWriter {
     }
 
     public synchronized void writeNullBulkString() throws IOException {
-        out.write("$-1\r\n".getBytes(StandardCharsets.UTF_8));
+        out.write("$-1\r\n".getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
     public synchronized void writeNullArray() throws IOException {
-        out.write("*-1\r\n".getBytes(StandardCharsets.UTF_8));
+        out.write("*-1\r\n".getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
     public synchronized void writeEmptyArray() throws IOException {
-        out.write("*0\r\n".getBytes(StandardCharsets.UTF_8));
+        out.write("*0\r\n".getBytes(StandardCharsets.ISO_8859_1));
         out.flush();
     }
 
     public synchronized void writeStringArray(List<String> items) throws IOException {
         StringBuilder header = new StringBuilder();
         header.append('*').append(items.size()).append("\r\n");
-        out.write(header.toString().getBytes(StandardCharsets.UTF_8));
+        out.write(header.toString().getBytes(StandardCharsets.ISO_8859_1));
         for (String item : items) {
             out.write(encodeBulkString(item));
         }
@@ -81,11 +81,11 @@ public class RespWriter {
 
     public static byte[] encodeBulkString(String s) {
         if (s == null) {
-            return "$-1\r\n".getBytes(StandardCharsets.UTF_8);
+            return "$-1\r\n".getBytes(StandardCharsets.ISO_8859_1);
         }
-        byte[] data = s.getBytes(StandardCharsets.UTF_8);
+        byte[] data = s.getBytes(StandardCharsets.ISO_8859_1);
         String header = "$" + data.length + "\r\n";
-        byte[] headerBytes = header.getBytes(StandardCharsets.UTF_8);
+        byte[] headerBytes = header.getBytes(StandardCharsets.ISO_8859_1);
         byte[] result = new byte[headerBytes.length + data.length + 2];
         System.arraycopy(headerBytes, 0, result, 0, headerBytes.length);
         System.arraycopy(data, 0, result, headerBytes.length, data.length);
@@ -95,18 +95,18 @@ public class RespWriter {
     }
 
     public static byte[] encodeSimpleString(String s) {
-        return ("+" + s + "\r\n").getBytes(StandardCharsets.UTF_8);
+        return ("+" + s + "\r\n").getBytes(StandardCharsets.ISO_8859_1);
     }
 
     public static byte[] encodeInteger(long v) {
-        return (":" + v + "\r\n").getBytes(StandardCharsets.UTF_8);
+        return (":" + v + "\r\n").getBytes(StandardCharsets.ISO_8859_1);
     }
 
     /** Encodes a command as a RESP array of bulk strings, e.g. for propagation to replicas. */
     public static byte[] encodeCommandArray(String... parts) {
         StringBuilder header = new StringBuilder();
         header.append('*').append(parts.length).append("\r\n");
-        byte[] headerBytes = header.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] headerBytes = header.toString().getBytes(StandardCharsets.ISO_8859_1);
 
         int totalLen = headerBytes.length;
         byte[][] encodedParts = new byte[parts.length][];

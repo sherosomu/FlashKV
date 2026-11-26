@@ -73,14 +73,18 @@ public class ReplicationState {
         }
 
         byte[] getAck = RespWriter.encodeCommandArray("REPLCONF", "GETACK", "*");
-        for (ReplicaConnection rc : replicas) {
-            try {
-                rc.rawOut.write(getAck);
-                rc.rawOut.flush();
-            } catch (IOException ignored) {
+        // Same lock as propagate(), so a GETACK can never be written into the middle
+        // of a command another thread is propagating on the same replica socket.
+        synchronized (this) {
+            for (ReplicaConnection rc : replicas) {
+                try {
+                    rc.rawOut.write(getAck);
+                    rc.rawOut.flush();
+                } catch (IOException ignored) {
+                }
             }
+            config.addToReplOffset(getAck.length);
         }
-        config.addToReplOffset(getAck.length);
 
         long deadline = System.currentTimeMillis() + timeoutMs;
         int acked = countAcked(targetOffset);
