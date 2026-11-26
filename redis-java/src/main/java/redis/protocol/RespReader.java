@@ -60,7 +60,10 @@ public class RespReader {
             readFully(buf);
             // consume trailing CRLF after the bulk string content
             readCRLF();
-            args[i] = new String(buf, StandardCharsets.UTF_8);
+            // ISO-8859-1 maps every byte 0x00-0xFF to exactly one char and back,
+            // so arbitrary binary values survive the String round trip unchanged
+            // (UTF-8 would replace invalid byte sequences with U+FFFD).
+            args[i] = new String(buf, StandardCharsets.ISO_8859_1);
         }
         return args;
     }

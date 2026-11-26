@@ -171,8 +171,12 @@ public class CommandDispatcher {
                 case "RPUSH", "LPUSH" -> handlePush(cmd, args, out, db, srv, fromMaster);
                 case "LRANGE" -> handleLrange(args, out, db);
                 case "LLEN" -> {
-                    RedisValue.ListValue lv = db.getListOrNull(args[1]);
-                    out.writeInteger(lv == null ? 0 : lv.items.size());
+                    int len;
+                    synchronized (db.getWaitLock()) {
+                        RedisValue.ListValue lv = db.getListOrNull(args[1]);
+                        len = lv == null ? 0 : lv.items.size();
+                    }
+                    out.writeInteger(len);
                 }
                 case "LPOP", "RPOP" -> handlePop(cmd, args, out, db, srv, fromMaster);
                 case "BLPOP" -> handleBlpop(args, ctx, out, db, srv);
@@ -215,6 +219,11 @@ public class CommandDispatcher {
             out.writeError("ERR value is not an integer or out of range");
         } catch (ArrayIndexOutOfBoundsException aioobe) {
             out.writeError("ERR wrong number of arguments for '" + args[0].toLowerCase() + "' command");
+        } catch (ArithmeticException ae) {
+            out.writeError("ERR increment or decrement would overflow");
+        } catch (RuntimeException re) {
+            // Any other bug becomes an error reply instead of killing the connection thread.
+            out.writeError("ERR internal error: " + re.getClass().getSimpleName());
         }
     }
 
@@ -240,18 +249,21 @@ public class CommandDispatcher {
             }
         }
 
-        String previous = db.getString(key);
-        boolean exists = db.exists(key);
-        if ((nx && exists) || (xx && !exists)) {
-            if (getFlag) {
-                if (previous == null) out.writeNullBulkString(); else out.writeBulkString(previous);
-            } else {
-                out.writeNullBulkString();
-            }
+        String previous = getFlag ? db.getString(key) : null;
+        // NX / XX use compute() so the existence check and the write are one atomic step.
+        boolean written;
+        if (nx) {
+            written = db.setStringIfAbsent(key, value, expireAt);
+        } else if (xx) {
+            written = db.setStringIfPresent(key, value, expireAt);
+        } else {
+            db.setString(key, value, expireAt);
+            written = true;
+        }
+        if (!written) {
+            if (getFlag && previous != null) out.writeBulkString(previous); else out.writeNullBulkString();
             return;
         }
-
-        db.setString(key, value, expireAt);
         maybePropagate("SET", args, srv, fromMaster);
 
         if (getFlag) {
@@ -262,20 +274,9 @@ public class CommandDispatcher {
     }
 
     private static void handleIncr(String[] args, RespWriter out, RedisDatabase db, ServerContext srv, boolean fromMaster) throws IOException {
-        String key = args[1];
-        String current = db.getString(key);
-        long value;
-        if (current == null) {
-            value = 1;
-        } else {
-            try {
-                value = Long.parseLong(current) + 1;
-            } catch (NumberFormatException e) {
-                out.writeError("ERR value is not an integer or out of range");
-                return;
-            }
-        }
-        db.setString(key, Long.toString(value), -1);
+        // Atomic read-modify-write (ConcurrentHashMap.compute); a non-integer value
+        // throws NumberFormatException, which executeCommand turns into the Redis error.
+        long value = db.incrBy(args[1], 1);
         out.writeInteger(value);
         maybePropagate("INCR", args, srv, fromMaster);
     }
@@ -379,7 +380,7 @@ public class CommandDispatcher {
         for (String[] queuedArgs : queued) {
             executeCommand(queuedArgs[0].toUpperCase(), queuedArgs, ctx, capture, srv, fromMaster);
         }
-        out.writeRaw(("*" + queued.size() + "\r\n").getBytes(StandardCharsets.UTF_8));
+        out.writeRaw(("*" + queued.size() + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         out.writeRaw(buffer.toByteArray());
     }
 
@@ -438,38 +439,40 @@ public class CommandDispatcher {
     // ---------------------------------------------------------------------
 
     private static void handlePush(String cmd, String[] args, RespWriter out, RedisDatabase db, ServerContext srv, boolean fromMaster) throws IOException {
-        RedisValue.ListValue list = db.getOrCreateList(args[1]);
+        // Every list read/write happens under the wait lock, so a push can't race a pop
+        // or land in a list that a concurrent pop just removed from the keyspace.
+        // Propagating inside the lock keeps the replica stream in the same order as the master.
+        int size;
         synchronized (db.getWaitLock()) {
+            RedisValue.ListValue list = db.getOrCreateList(args[1]);
             for (int i = 2; i < args.length; i++) {
                 if (cmd.equals("RPUSH")) list.items.addLast(args[i]);
                 else list.items.addFirst(args[i]);
             }
+            size = list.items.size();
+            maybePropagate(cmd, args, srv, fromMaster);
             db.getWaitLock().notifyAll();
         }
-        out.writeInteger(list.items.size());
-        maybePropagate(cmd, args, srv, fromMaster);
+        out.writeInteger(size);
     }
 
     private static void handleLrange(String[] args, RespWriter out, RedisDatabase db) throws IOException {
-        RedisValue.ListValue lv = db.getListOrNull(args[1]);
-        if (lv == null) {
-            out.writeEmptyArray();
-            return;
-        }
-        int size = lv.items.size();
-        int start = normalizeIndex(Integer.parseInt(args[2]), size);
-        int stop = normalizeIndex(Integer.parseInt(args[3]), size);
-        start = Math.max(start, 0);
-        stop = Math.min(stop, size - 1);
-        if (start > stop || size == 0) {
-            out.writeEmptyArray();
-            return;
-        }
+        int startArg = Integer.parseInt(args[2]);
+        int stopArg = Integer.parseInt(args[3]);
         List<String> result = new ArrayList<>();
-        int idx = 0;
-        for (String item : lv.items) {
-            if (idx >= start && idx <= stop) result.add(item);
-            idx++;
+        synchronized (db.getWaitLock()) {
+            RedisValue.ListValue lv = db.getListOrNull(args[1]);
+            if (lv != null) {
+                int size = lv.items.size();
+                int start = Math.max(normalizeIndex(startArg, size), 0);
+                int stop = Math.min(normalizeIndex(stopArg, size), size - 1);
+                int idx = 0;
+                for (String item : lv.items) {
+                    if (idx > stop) break;
+                    if (idx >= start) result.add(item);
+                    idx++;
+                }
+            }
         }
         out.writeStringArray(result);
     }
@@ -479,27 +482,29 @@ public class CommandDispatcher {
     }
 
     private static void handlePop(String cmd, String[] args, RespWriter out, RedisDatabase db, ServerContext srv, boolean fromMaster) throws IOException {
-        RedisValue.ListValue lv = db.getListOrNull(args[1]);
         Integer count = args.length > 2 ? Integer.parseInt(args[2]) : null;
-
-        if (lv == null || lv.items.isEmpty()) {
-            if (count == null) out.writeNullBulkString(); else out.writeNullArray();
-            return;
-        }
-        if (count == null) {
-            String val = cmd.equals("LPOP") ? lv.items.removeFirst() : lv.items.removeLast();
-            db.removeIfEmptyList(args[1]);
-            out.writeBulkString(val);
-            maybePropagate(cmd, args, srv, fromMaster);
-        } else {
-            List<String> result = new ArrayList<>();
-            int n = Math.min(count, lv.items.size());
-            for (int i = 0; i < n; i++) {
-                result.add(cmd.equals("LPOP") ? lv.items.removeFirst() : lv.items.removeLast());
+        List<String> result = new ArrayList<>();
+        boolean found = false;
+        // The emptiness check and the removal must be one atomic step; without the lock,
+        // two clients could both see one item left and the second removeFirst() would throw.
+        synchronized (db.getWaitLock()) {
+            RedisValue.ListValue lv = db.getListOrNull(args[1]);
+            if (lv != null && !lv.items.isEmpty()) {
+                found = true;
+                int n = count == null ? 1 : Math.min(count, lv.items.size());
+                for (int i = 0; i < n; i++) {
+                    result.add(cmd.equals("LPOP") ? lv.items.removeFirst() : lv.items.removeLast());
+                }
+                db.removeIfEmptyList(args[1]);
+                maybePropagate(cmd, args, srv, fromMaster);
             }
-            db.removeIfEmptyList(args[1]);
+        }
+        if (!found) {
+            if (count == null) out.writeNullBulkString(); else out.writeNullArray();
+        } else if (count == null) {
+            out.writeBulkString(result.get(0));
+        } else {
             out.writeStringArray(result);
-            maybePropagate(cmd, args, srv, fromMaster);
         }
     }
 
@@ -511,32 +516,32 @@ public class CommandDispatcher {
         long deadline = timeoutMs > 0 ? System.currentTimeMillis() + timeoutMs : Long.MAX_VALUE;
 
         Object lock = db.getWaitLock();
+        List<String> popped = null;
         synchronized (lock) {
+            outer:
             while (true) {
                 for (String key : keys) {
                     RedisValue.ListValue lv = db.getListOrNull(key);
                     if (lv != null && !lv.items.isEmpty()) {
                         String val = lv.items.removeFirst();
                         db.removeIfEmptyList(key);
-                        out.writeStringArray(List.of(key, val));
                         maybePropagate("LPOP", new String[]{"LPOP", key}, srv, false);
-                        return;
+                        popped = List.of(key, val);
+                        break outer;
                     }
                 }
                 long remaining = deadline - System.currentTimeMillis();
-                if (timeoutMs > 0 && remaining <= 0) {
-                    out.writeNullArray();
-                    return;
-                }
+                if (timeoutMs > 0 && remaining <= 0) break;
                 try {
                     lock.wait(timeoutMs > 0 ? remaining : 100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    out.writeNullArray();
-                    return;
+                    break;
                 }
             }
         }
+        // Reply after releasing the lock, so a slow client can't stall every other writer.
+        if (popped != null) out.writeStringArray(popped); else out.writeNullArray();
     }
 
     // ---------------------------------------------------------------------
@@ -567,10 +572,10 @@ public class CommandDispatcher {
             }
             stream.entries.put(newId, fields);
             stream.lastId = newId;
+            maybePropagate("XADD", args, srv, fromMaster);
             db.getWaitLock().notifyAll();
         }
         out.writeBulkString(newId.toString());
-        maybePropagate("XADD", args, srv, fromMaster);
     }
 
     /** Resolves "*", "ms-*", or an explicit "ms-seq" id against the current stream state. Returns null if invalid (<=0-0). */
@@ -603,9 +608,11 @@ public class CommandDispatcher {
         }
         List<byte[]> entries = new ArrayList<>();
         if (stream != null) {
-            for (Map.Entry<StreamId, LinkedHashMap<String, String>> e : stream.entries.subMap(start, true, end, true).entrySet()) {
-                entries.add(encodeStreamEntry(e.getKey(), e.getValue()));
-                if (count != null && entries.size() >= count) break;
+            synchronized (db.getWaitLock()) { // TreeMap is not thread-safe; XADD writes under this lock
+                for (Map.Entry<StreamId, LinkedHashMap<String, String>> e : stream.entries.subMap(start, true, end, true).entrySet()) {
+                    entries.add(encodeStreamEntry(e.getKey(), e.getValue()));
+                    if (count != null && entries.size() >= count) break;
+                }
             }
         }
         out.writeRaw(buildRawArray(entries));
@@ -645,31 +652,23 @@ public class CommandDispatcher {
         boolean blocking = blockMs != null;
 
         Object lock = db.getWaitLock();
+        List<byte[]> perStreamResults = List.of();
         synchronized (lock) {
             while (true) {
-                List<byte[]> perStreamResults = collectXreadResults(db, keys, startIds, count);
-                if (!perStreamResults.isEmpty()) {
-                    out.writeRaw(buildRawArray(perStreamResults));
-                    return;
-                }
-                if (!blocking) {
-                    out.writeNullArray();
-                    return;
-                }
+                perStreamResults = collectXreadResults(db, keys, startIds, count);
+                if (!perStreamResults.isEmpty() || !blocking) break;
                 long remainingMs = deadline - System.currentTimeMillis();
-                if (blockMs > 0 && remainingMs <= 0) {
-                    out.writeNullArray();
-                    return;
-                }
+                if (blockMs > 0 && remainingMs <= 0) break;
                 try {
                     lock.wait(blockMs > 0 ? remainingMs : 100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    out.writeNullArray();
-                    return;
+                    break;
                 }
             }
         }
+        // Reply after releasing the lock, so a slow client can't stall every other writer.
+        if (perStreamResults.isEmpty()) out.writeNullArray(); else out.writeRaw(buildRawArray(perStreamResults));
     }
 
     private static List<byte[]> collectXreadResults(RedisDatabase db, String[] keys, StreamId[] startIds, Integer count) {
@@ -702,7 +701,7 @@ public class CommandDispatcher {
             flat.add(f.getKey());
             flat.add(f.getValue());
         }
-        writeQuiet(b, ("*" + flat.size() + "\r\n").getBytes(StandardCharsets.UTF_8));
+        writeQuiet(b, ("*" + flat.size() + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         for (String s : flat) {
             writeQuiet(b, RespWriter.encodeBulkString(s));
         }
@@ -711,13 +710,13 @@ public class CommandDispatcher {
 
     private static byte[] buildRawArray(List<byte[]> items) {
         ByteArrayOutputStream b = new ByteArrayOutputStream();
-        writeQuiet(b, ("*" + items.size() + "\r\n").getBytes(StandardCharsets.UTF_8));
+        writeQuiet(b, ("*" + items.size() + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
         for (byte[] item : items) writeQuiet(b, item);
         return b.toByteArray();
     }
 
     private static void writeQuiet(ByteArrayOutputStream b, String s) {
-        writeQuiet(b, s.getBytes(StandardCharsets.UTF_8));
+        writeQuiet(b, s.getBytes(StandardCharsets.ISO_8859_1));
     }
 
     private static void writeQuiet(ByteArrayOutputStream b, byte[] data) {

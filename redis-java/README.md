@@ -6,7 +6,8 @@ progression: networking, the RESP protocol, strings & expiry, RDB loading,
 lists & blocking commands, transactions, pub/sub, streams, and leader/replica
 replication (including `WAIT`).
 
-No external dependencies — pure JDK (17+), built with Maven.
+No runtime dependencies — pure JDK (17+), built with Maven. JUnit 5 is used for tests only.
+See [CHANGES.md](CHANGES.md) for the concurrency, expiry and binary-safety fixes.
 
 ## Project layout
 
@@ -90,7 +91,7 @@ redis-cli -p 6380 GET foo
 | Networking / concurrency            | TCP accept loop, one thread per client connection                        |
 | RESP protocol                       | Arrays, bulk strings, simple strings, errors, integers; inline fallback  |
 | Basic commands                      | `PING`, `ECHO`                                                            |
-| Strings & expiry                    | `SET` (`PX`/`EX`/`NX`/`XX`/`GET`), `GET`, `DEL`, `EXISTS`, `TYPE`, `KEYS`, `INCR`, `EXPIRE`, `TTL`, `PTTL`, `PERSIST` |
+| Strings & expiry                    | `SET` (`PX`/`EX`/`NX`/`XX`/`GET`), `GET`, `DEL`, `EXISTS`, `TYPE`, `KEYS`, `INCR`, `EXPIRE`, `TTL`, `PTTL`, `PERSIST`; passive expiry on access + active background expiry cycle (10 Hz, 20-key samples) |
 | Config / introspection              | `CONFIG GET dir\|dbfilename`, `INFO replication`, `OBJECT ENCODING`, `COMMAND` |
 | RDB persistence                     | Loads string keys + expiry from an RDB file at startup (`RdbLoader`)     |
 | Lists                                | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `RPOP`, blocking `BLPOP`      |
@@ -123,6 +124,16 @@ called out so nothing is a surprise:
 
 All of the above are isolated to `RdbLoader`/`EmptyRdb`/replication full-sync
 — straightforward to extend if you want to take this further.
+
+## Automated tests
+
+```bash
+mvn test
+```
+
+23 JUnit tests cover the RESP parser (split frames, CRLF inside values, all 256 byte values),
+active and passive expiry, atomic INCR / SET NX under 16 threads, concurrent LPUSH/LPOP over
+real TCP connections, BLPOP wake-up, and a live master/replica pair with `WAIT`.
 
 ## Testing it locally
 
